@@ -13,6 +13,14 @@ Klien -> http://127.0.0.1:8000/v1 -> [nilai tugas] -> OpenAI-compatible upstream
 
 Berjalan **hanya di komputermu** (bind ke `127.0.0.1`), tidak perlu hosting.
 
+## Tech stack
+
+- **Python 3** + **FastAPI** + **uvicorn** (server), **httpx** (client async ke upstream)
+- **python-dotenv** untuk konfigurasi `.env`
+- **pytest** untuk unit test
+- Log keputusan: `logs/decisions.jsonl` (append-only, JSON per baris) — dipakai untuk audit penghematan dan menemukan tugas yang salah rute.
+- Tanpa database, tanpa dependensi berat: ~430 baris kode inti (`app/main.py` + `app/routing.py`).
+
 ## Menjalankan (cepat)
 
 Semua lewat cmd, dari folder proyek:
@@ -174,7 +182,8 @@ Gunakan log ini untuk menghitung penghematan dan menemukan tugas yang salah diru
 ```bash
 .venv/Scripts/python.exe -m pytest tests -q
 ```
-## Keterbatasan (jujur)
+
+## Keterbatasan
 
 - Heuristik berbasis aturan: bisa salah menilai. Cek log dan sesuaikan kata kunci/threshold.
 - Tidak bisa downgrade heavy->light dalam satu giliran (by design: lindungi prompt-cache).
@@ -186,9 +195,3 @@ Gunakan log ini untuk menghitung penghematan dan menemukan tugas yang salah diru
 - Streaming dan tool calling sudah diuji end-to-end lewat Hermes (2026-10-15), termasuk
   saat provider mengembalikan 429 di tengah jalan (diteruskan apa adanya, klien retry sendiri).
 - Tidak ada rate limit atau batas biaya; pantau saldo billing upstreammu.
-
-## Keamanan
-
-- Jangan commit `.env` (sudah ada di `.gitignore`).
-- Biarkan bind ke `127.0.0.1`. Isi `LOCAL_API_KEY` agar proses lain di komputer tidak bisa memakai kuncimu.
-- Jangan kirim data sensitif ke model tanpa memahami kebijakan data provider.
