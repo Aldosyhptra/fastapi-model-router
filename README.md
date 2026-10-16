@@ -182,7 +182,6 @@ Gunakan log ini untuk menghitung penghematan dan menemukan tugas yang salah diru
 ```bash
 .venv/Scripts/python.exe -m pytest tests -q
 ```
-
 ## Keterbatasan
 
 - Heuristik berbasis aturan: bisa salah menilai. Cek log dan sesuaikan kata kunci/threshold.
