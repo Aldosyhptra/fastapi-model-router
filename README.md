@@ -174,18 +174,6 @@ Gunakan log ini untuk menghitung penghematan dan menemukan tugas yang salah diru
 ```bash
 .venv/Scripts/python.exe -m pytest tests -q
 ```
-## Keterbatasan (jujur)
-
-- Heuristik berbasis aturan: bisa salah menilai. Cek log dan sesuaikan kata kunci/threshold.
-- Tidak bisa downgrade heavy->light dalam satu giliran (by design: lindungi prompt-cache).
-- Upgrade light->heavy di tengah giliran tetap memakai cache (prompt yang dikirim identik;
-  yang berubah hanya tujuan model).
-- Estimasi token kasar (karakter / 4), bukan tokenizer asli.
-- Cache keputusan ada di memori; hilang saat server restart.
-- Belum ada eskalasi otomatis berbasis hasil (light gagal -> ulang di heavy).
-- Streaming dan tool calling sudah diuji end-to-end lewat Hermes (2026-10-15), termasuk
-  saat provider mengembalikan 429 di tengah jalan (diteruskan apa adanya, klien retry sendiri).
-- Tidak ada rate limit atau batas biaya; pantau saldo billing upstreammu.
 
 ## Keamanan
 
