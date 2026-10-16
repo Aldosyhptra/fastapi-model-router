@@ -40,6 +40,25 @@ LOG_PATH = Path(os.environ.get("LOG_PATH", "logs/decisions.jsonl"))
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 BIND_PORT = os.environ.get("BIND_PORT", "8000")
 MAX_BODY_BYTES = 20 * 1024 * 1024
+# Kebijakan thinking: light = jangan buang token reasoning (param dibuang sebelum forward);
+# heavy = boleh thinking. HEAVY_REASONING_EFFORT (mis. "high") mengisi reasoning_effort
+# saat klien tidak mengirim apa pun - kosongkan kalau model upstream menolak param ini.
+THINKING_KEYS = ("reasoning_effort", "reasoning", "thinking", "enable_thinking", "extended_thinking")
+HEAVY_REASONING_EFFORT = os.environ.get("HEAVY_REASONING_EFFORT", "").strip()
+
+
+def apply_thinking_policy(tier: str, payload: dict) -> str:
+    """Atur param thinking sesuai tier. Return tag untuk log ("" kalau tidak ada perubahan)."""
+    if tier == "light":
+        stripped = [k for k in THINKING_KEYS if k in payload]
+        for k in stripped:
+            payload.pop(k, None)
+        return "thinking:strip" if stripped else ""
+    if tier == "heavy" and HEAVY_REASONING_EFFORT:
+        if not any(k in payload for k in THINKING_KEYS):
+            payload["reasoning_effort"] = HEAVY_REASONING_EFFORT
+            return f"thinking:{HEAVY_REASONING_EFFORT}"
+    return ""
 
 # Nama model virtual yang diterima dari klien (Hermes)
 AUTO_ALIASES = {"auto", "router", "smart"}
@@ -144,6 +163,9 @@ async def chat_completions(request: Request):
 
     upstream_payload = dict(payload)
     upstream_payload["model"] = model
+    t_tag = apply_thinking_policy(tier, upstream_payload)
+    if t_tag:
+        reason = f"{reason}; {t_tag}" if reason else t_tag
     stream = bool(payload.get("stream"))
     url = f"{BASE_URL}/chat/completions"
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}

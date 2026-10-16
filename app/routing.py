@@ -4,11 +4,11 @@ Ide: nilai "seberapa berat" pesan PENGGUNA terakhir dengan skor sederhana.
 Skor >= threshold -> tier "heavy" (model kuat), selain itu "light" (model murah).
 
 Catatan desain:
-- Yang dinilai hanya pesan role "user", BUKAN hasil tool. Hasil tool pendek
-  akan salah terbaca "ringan" padahal tugasnya berat.
-- Keputusan dikunci (sticky) selama satu giliran pengguna. Agent mengirim ulang
-  seluruh konteks di tiap langkah, dan cache prompt hanya berlaku per model,
-  jadi ganti model di tengah giliran = konteks dihitung ulang penuh.
+- Yang dinilai teks pesan role "user" TERAKHIR + sinyal kerja agen (tool_calls mutasi
+  dan panjang loop) pada pesan setelah user terakhir.
+- Keputusan per giliran dikunci, tapi boleh UPGRADE light->heavy di tengah giliran saat
+  sinyal kerja agen naik (satu arah; downgrade merusak prompt-cache). Agent mengirim ulang
+  seluruh konteks di tiap langkah, dan cache prompt hanya berlaku per model.
 """
 from __future__ import annotations
 
@@ -55,6 +55,60 @@ AUX_RE = re.compile(
     r"|summar(y|ize)\s+(of\s+)?(the\s+)?conversation",
     re.IGNORECASE | re.DOTALL,
 )
+# Tool yang MUTASI (agent mengubah sesuatu) -> sinyal kerja berat
+MUTATION_RE = re.compile(
+    r"write|edit|patch|apply|delete|remove|rename|move|copy|insert|update"
+    r"|commit|push|install|migrat",
+    re.IGNORECASE,
+)
+# Tool shell/terminal: mutasi dilihat dari isi command-nya
+SHELL_RE = re.compile(r"^(terminal|bash|shell|run|exec|command)", re.IGNORECASE)
+# File sumber kode (bukan dokumen/config) -> risiko layout/bug, perlu model kuat
+SRC_EXT_RE = re.compile(r"\.(?:py|ts|tsx|js|jsx|html|css|scss|sql|go|rs|java|rb|php)\b", re.IGNORECASE)
+
+
+def agent_score(messages: list[dict]) -> tuple[int, list[str]]:
+    """Nilai APA YANG SEDANG DILAKUKAN agen pada giliran ini.
+
+    Sinyal diambil dari pesan setelah user terakhir (tool_calls & step agent),
+    bukan dari teks user. Dipakai untuk meng-upgrade tier di tengah giliran.
+    """
+    last_user = -1
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and m.get("role") == "user":
+            last_user = i
+    tail = [m for m in messages[last_user + 1:] if isinstance(m, dict)]
+    score = 0
+    reasons: list[str] = []
+
+    mutated = False
+    src_edit = False
+    for m in tail:
+        for tc in (m.get("tool_calls") or []):
+            fn = tc.get("function", tc) if isinstance(tc, dict) else {}
+            if not isinstance(fn, dict):
+                continue
+            name = str(fn.get("name", ""))
+            args = str(fn.get("arguments", ""))
+            if MUTATION_RE.search(name) or (SHELL_RE.search(name) and MUTATION_RE.search(args)):
+                mutated = True
+                if SRC_EXT_RE.search(args):
+                    src_edit = True
+    if mutated:
+        score += 2
+        reasons.append("mutasi")
+    if src_edit:
+        score += 1
+        reasons.append("file-sumber")
+
+    n = len(tail)
+    if n >= 12:
+        score += 2
+        reasons.append(f"loop-panjang:{n}")
+    elif n >= 6:
+        score += 1
+        reasons.append(f"loop:{n}")
+    return score, reasons
 
 
 @dataclass(frozen=True)
@@ -120,29 +174,8 @@ class TurnCache:
         self._data[session] = (tier, turn, time.time())
 
 
-def decide(
-    messages: list[dict],
-    has_tools: bool,
-    cache: TurnCache,
-    threshold: int = 3,
-) -> Decision:
-    user_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]
-    first = content_to_text(user_msgs[0].get("content")) if user_msgs else ""
-    last = content_to_text(user_msgs[-1].get("content")) if user_msgs else ""
-    session = _h(first[:2000])
-    turn = _h(f"{last}|{len(user_msgs)}")
-    est = estimate_tokens(messages)
-
-    # 1) Masih giliran pengguna yang sama (agent sedang looping) -> pakai tier yang sama
-    cached = cache.get(session, turn)
-    if cached:
-        return Decision(cached, "sticky (giliran sama)", 0, est, session, True)
-
-    # 2) Panggilan bantu otomatis tanpa tool -> ringan
-    if not has_tools and AUX_RE.search(last):
-        cache.set(session, turn, "light")
-        return Decision("light", "panggilan bantu (judul/ringkasan)", 0, est, session)
-
+def base_score(last: str, est: int) -> tuple[int, list[str]]:
+    """Skor dari teks pesan user terakhir + ukuran konteks."""
     text = last.lower()
     score = 0
     reasons: list[str] = []
@@ -189,6 +222,50 @@ def decide(
         score -= min(len(light), 3)
         reasons.append(f"ringan:{','.join(light[:3])}")
 
+    return score, reasons
+
+
+def decide(
+    messages: list[dict],
+    has_tools: bool,
+    cache: TurnCache,
+    threshold: int = 3,
+) -> Decision:
+    user_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]
+    first = content_to_text(user_msgs[0].get("content")) if user_msgs else ""
+    last = content_to_text(user_msgs[-1].get("content")) if user_msgs else ""
+    session = _h(first[:2000])
+    turn = _h(f"{last}|{len(user_msgs)}")
+    est = estimate_tokens(messages)
+
+    # 1) Giliran sama: nilai ulang sinyal kerja agen; tier boleh NAIK saja
+    #    (upgrade satu arah) - tidak pernah turun supaya cache prompt aman.
+    #    total = skor-dasar + sinyal-agen-kini (tidak diakumulasi antar call,
+    #    supaya satu mutasi tidak dihitung berkali-kali).
+    prev = cache.get(session, turn)
+    if prev is not None:
+        prev_tier, base, base_reasons = prev
+        a_score, a_reasons = agent_score(messages)
+        total = base + a_score
+        reasons = list(base_reasons) + a_reasons
+        tier = "heavy" if total >= threshold else prev_tier
+        if tier != prev_tier:
+            reasons.append(f"upgrade:{prev_tier}->{tier}")
+        cache.set(session, turn, (tier, base, base_reasons))
+        return Decision(tier, "; ".join(reasons) or "sticky", total, est, session,
+                        cached=(tier == prev_tier))
+
+    # 2) Panggilan bantu otomatis tanpa tool -> ringan
+    if not has_tools and AUX_RE.search(last):
+        cache.set(session, turn, ("light", 0, ["panggilan-bantu"]))
+        return Decision("light", "panggilan bantu (judul/ringkasan)", 0, est, session)
+
+    # 3) Giliran baru: skor dasar dari teks user + sinyal kerja agen pada call pertama
+    score, reasons = base_score(last, est)
+    a_score, a_reasons = agent_score(messages)
+    score += a_score
+    reasons += a_reasons
+
     tier = "heavy" if score >= threshold else "light"
-    cache.set(session, turn, tier)
+    cache.set(session, turn, (tier, score, reasons))
     return Decision(tier, "; ".join(reasons) or "tanpa-sinyal", score, est, session)

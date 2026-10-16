@@ -129,7 +129,7 @@ harus satu-satunya yang memutuskan.
 
 ## Cara menilai tugas (app/routing.py)
 
-Skor dari pesan **user** terakhir (bukan hasil tool):
+Skor dari pesan **user** terakhir (bukan hasil tool) + **sinyal kerja agen** per API call:
 
 | Sinyal | Skor |
 |---|---|
@@ -141,11 +141,27 @@ Skor dari pesan **user** terakhir (bukan hasil tool):
 | Pesan panjang (>600 / >1500 karakter) | +1 / +2 |
 | Konteks besar (>12k / >30k token) | +1 / +2 |
 | Kata ringan (rename, format, jelaskan, ...) | -1 per kata (maks -3) |
+| **Agen memanggil tool mutasi** (write/edit/patch/install/git commit, atau shell dengan perintah ubah) | **+2** |
+| **Mutasi menyasar file sumber** (.py/.tsx/.js/.css/... bukan dokumen) | **+1** |
+| **Loop agen panjang** (≥6 / ≥12 pesan setelah user terakhir) | **+1 / +2** |
 
 Skor >= `HEAVY_THRESHOLD` (bawaan 3) -> heavy. Panggilan bantu otomatis (judul/ringkasan,
-tanpa tool) selalu light. Keputusan **dikunci (sticky) selama satu giliran pengguna** — cache
-in-memory per sesi, TTL 6 jam, maks 2000 sesi — supaya cache prompt upstream tidak terbuang
-saat agent mengirim ulang konteks di tiap langkah loop-nya.
+tanpa tool) selalu light.
+
+**Kebijakan upgrade satu arah (versi 2):** keputusan awal di-cache per giliran pengguna
+(in-memory, TTL 6 jam, maks 2000 sesi), tapi setiap API call sinyal kerja agen dinilai ulang.
+Tier boleh **naik** light->heavy di tengah giliran (mis. user cuma minta "ubah warna" tapi agen
+malah mengedit file sumber) — dan tidak pernah turun, supaya cache prompt upstream tidak
+bolak-balik. Sinyal agen tidak diakumulasi antar call (mutasi yang sama tidak dihitung dua kali).
+
+## Kebijakan thinking (reasoning)
+
+- Tier **light**: param thinking (`reasoning_effort`, `thinking`, `enable_thinking`, dst.)
+  otomatis **dibuang** sebelum forward — token reasoning di request ringan hanya memboroskan.
+- Tier **heavy**: klien boleh thinking; kalau klien tidak mengirim apa pun, router mengisi
+  `reasoning_effort` dari `HEAVY_REASONING_EFFORT` (mis. `high`). Kosongkan nilai ini kalau
+  model upstream menolak param tersebut.
+- Hasilnya tercatat di `decisions.jsonl`: `thinking:strip` (dibuang) atau `thinking:high` (diisi).
 
 ## Log
 
@@ -158,3 +174,21 @@ Gunakan log ini untuk menghitung penghematan dan menemukan tugas yang salah diru
 ```bash
 .venv/Scripts/python.exe -m pytest tests -q
 ```
+## Keterbatasan (jujur)
+
+- Heuristik berbasis aturan: bisa salah menilai. Cek log dan sesuaikan kata kunci/threshold.
+- Tidak bisa downgrade heavy->light dalam satu giliran (by design: lindungi prompt-cache).
+- Upgrade light->heavy di tengah giliran tetap memakai cache (prompt yang dikirim identik;
+  yang berubah hanya tujuan model).
+- Estimasi token kasar (karakter / 4), bukan tokenizer asli.
+- Cache keputusan ada di memori; hilang saat server restart.
+- Belum ada eskalasi otomatis berbasis hasil (light gagal -> ulang di heavy).
+- Streaming dan tool calling sudah diuji end-to-end lewat Hermes (2026-10-15), termasuk
+  saat provider mengembalikan 429 di tengah jalan (diteruskan apa adanya, klien retry sendiri).
+- Tidak ada rate limit atau batas biaya; pantau saldo billing upstreammu.
+
+## Keamanan
+
+- Jangan commit `.env` (sudah ada di `.gitignore`).
+- Biarkan bind ke `127.0.0.1`. Isi `LOCAL_API_KEY` agar proses lain di komputer tidak bisa memakai kuncimu.
+- Jangan kirim data sensitif ke model tanpa memahami kebijakan data provider.
