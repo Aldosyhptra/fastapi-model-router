@@ -77,5 +77,50 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(content_to_text(parts), "hello")
 
 
+def assistant_with_tool(name: str, args: str):
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": name, "arguments": args}}],
+    }
+
+
+class UpgradeTests(unittest.TestCase):
+    """Sinyal kerja agen boleh meng-upgrade tier di tengah giliran (satu arah)."""
+
+    def setUp(self):
+        self.cache = TurnCache()
+
+    def test_light_turn_upgrades_when_agent_edits_source(self):
+        base = msgs("ubah warna tombol jadi biru")
+        first = decide(base, True, self.cache)
+        self.assertEqual(first.tier, "light")
+        looping = base + [
+            assistant_with_tool("write_file", '{"path":"page.tsx"}'),
+            {"role": "tool", "content": "ok"},
+        ]
+        second = decide(looping, True, self.cache)
+        self.assertEqual(second.tier, "heavy")
+        self.assertIn("upgrade", second.reason)
+
+    def test_heavy_never_downgrades(self):
+        base = msgs("Rancang arsitektur sistem antrian")
+        decide(base, True, self.cache)
+        looping = base + [
+            assistant_with_tool("read_file", '{"path":"app.py"}'),
+            {"role": "tool", "content": "isi"},
+        ]
+        d = decide(looping, True, self.cache)
+        self.assertEqual(d.tier, "heavy")
+        self.assertTrue(d.cached)
+
+    def test_pure_chat_stays_light(self):
+        base = msgs("rename variabel x jadi total")
+        looping = base + [{"role": "assistant", "content": f"langkah {i}"} for i in range(5)]
+        d = decide(looping, True, self.cache)
+        self.assertEqual(d.tier, "light")
+
+
 if __name__ == "__main__":
     unittest.main()
