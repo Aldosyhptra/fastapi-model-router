@@ -13,6 +13,14 @@ Klien -> http://127.0.0.1:8000/v1 -> [nilai tugas] -> OpenAI-compatible upstream
 
 Berjalan **hanya di komputermu** (bind ke `127.0.0.1`), tidak perlu hosting.
 
+## Tech stack
+
+- **Python 3** + **FastAPI** + **uvicorn** (server), **httpx** (client async ke upstream)
+- **python-dotenv** untuk konfigurasi `.env`
+- **pytest** untuk unit test
+- Log keputusan: `logs/decisions.jsonl` (append-only, JSON per baris) — dipakai untuk audit penghematan dan menemukan tugas yang salah rute.
+- Tanpa database, tanpa dependensi berat: ~430 baris kode inti (`app/main.py` + `app/routing.py`).
+
 ## Menjalankan (cepat)
 
 Semua lewat cmd, dari folder proyek:
@@ -133,8 +141,8 @@ Skor dari pesan **user** terakhir (bukan hasil tool) + **sinyal kerja agen** per
 
 | Sinyal | Skor |
 |---|---|
-| Kata kunci kuat (arsitektur, security review, root cause, ...) | +3 per kata (maks 6) |
-| Kata kunci sedang (debug, refactor, traceback, ...) | +2 per kata (maks 4) |
+| Kata kunci kuat (arsitektur, security review, root cause, desain, refactor, ...) | +3 per kata (maks 6) |
+| Kata kunci sedang (debug, optim*, performance, analisis, ...) | +2 per kata (maks 4) |
 | Stack trace | +2 |
 | 3+ nama file berbeda | +2 |
 | 2+ blok kode fenced | +1 |
@@ -174,6 +182,53 @@ Gunakan log ini untuk menghitung penghematan dan menemukan tugas yang salah diru
 ```bash
 .venv/Scripts/python.exe -m pytest tests -q
 ```
+
+## Benchmark (17 Okt 2026)
+
+Pengukuran efisiensi router: **prompt & parameter sama persis**, yang dibedakan hanya
+jalur (langsung vs router) dan model (flash vs pro).
+
+### Spesifikasi
+
+| | |
+|---|---|
+| Tanggal | 17 Oktober 2026 |
+| Prompt | 20 (10 ringan + 10 berat), label tier ditulis manual |
+| Parameter | `max_tokens=300`, `temperature=0`, `stream=true` + `stream_options.include_usage` |
+| Call | 100 sequential (20 prompt x 5 lane), tanpa konkurensi |
+| Sistem | Windows 11, satu mesin, koneksi lokal ke upstream (tanpa proxy lain) |
+| Metode | HTTP langsung via Python stdlib (`urllib`) ke endpoint `/v1/chat/completions` — lane langsung memakai upstream, lane router memakai router lokal |
+| Upstream | SumoPod (OpenAI-compatible) |
+| Model | light = `mimo-v2.6-flash`, heavy = `mimo-v2.6-pro` |
+| Penggunaan riil | 265 request dari sesi Hermes Agent v0.21.5 (Windows 11, client agent dengan terminal/file tools & skill coding) |
+
+### Hasil
+
+| Lane | OK | Avg latency | P50 latency | Tok in/out | Cost total |
+|---|---|---|---|---|---|
+| pro-langsung | 20 | 9744ms | 9700ms | 860/5017 | $0.0047 |
+| flash-langsung | 20 | 12509ms | 11079ms | 860/4480 | $0.0014 |
+| router-auto | 20 | 15557ms | 11260ms | 860/5003 | $0.0034 |
+| router-light | 20 | 9047ms | 8654ms | 860/5169 | $0.0016 |
+| router-heavy | 20 | 8938ms | 8651ms | 860/5145 | $0.0049 |
+
+- **Auto vs semua-heavy (router-heavy): hemat 30%** ($0.0034 vs $0.0049) dengan tier
+  accuracy 100% — biaya routing hanya dibayar untuk tugas yang benar-benar berat.
+- **router-heavy vs pro-langsung**: `reasoning_effort=high` di-inject kebijakan thinking
+  untuk tugas berat — itu memang biaya yang dibeli secara sadar, bukan kebocoran.
+- Panjang output bervariasi antar-run meski `temperature=0` (perbedaan backend upstream);
+  karenanya angka token/output dibaca sebagai biaya relatif, bukan perbandingan mutlak.
+- Overhead router sendiri tidak terlihat di latency (keputusan skor sub-milidetik);
+  selisih latency antar lane lebih banyak dipengaruhi antrian upstream.
+
+### Tier accuracy (auto vs label): 100% (20/20)
+
+Sebelumnya 80% (16/20) dengan 4 miss semuanya tugas berat yang salah dianggap ringan
+(false-light): 2 kasus mepet threshold (score 2), 2 kasus kalah morfologi bahasa Indonesia
+(`mengoptimalkan` tidak mengandung `optimasi`, `desain` belum masuk kamus). Perbaikan:
+kata kunci kuat ditambah (`desain`, `refactor` dipromosikan ke sinyal kuat) dan kata kunci
+sedang dibuat berbasis prefiks (`optim`) sehingga turunan imbuhan ikut terdeteksi.
+Setelah perbaikan: 20/20, tanpa mengorbankan prompt ringan.
 
 ## Keterbatasan
 

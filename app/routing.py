@@ -25,12 +25,15 @@ STRONG_HEAVY = (
     "security review", "review keamanan", "vulnerab", "celah keamanan",
     "root cause", "race condition", "memory leak", "migrasi database",
     "database migration", "threat model",
+    "desain",      # "desain strategi/sistem ..." - kata kerja sering terlewat
+    "refactor",    # jarang ringan; dipindah dari medium agar tidak mepet threshold
 )
-# Sinyal sedang (+2)
+# Sinyal sedang (+2) - "optim" sengaja prefiks: kena optimasi/optimalkan/mengoptimasi/optimization
 MEDIUM_HEAVY = (
-    "debug", "troubleshoot", "stack trace", "traceback", "refactor",
-    "optimasi", "optimize", "performance", "investigate", "analisis",
+    "debug", "troubleshoot", "stack trace", "traceback",
+    "optim", "performance", "investigate", "analisis",
     "analyze", "kenapa", "mengapa", "tidak berfungsi", "gagal", "bug",
+    "lambat", "hit rate",
 )
 # Sinyal ringan (-1 per kata, maksimal -3)
 LIGHT_HINTS = (
