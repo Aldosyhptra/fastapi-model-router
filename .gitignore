@@ -7,6 +7,9 @@
 AGENTS.md
 CLAUDE.md
 
+# Benchmark lokal (README memuat metode + hasilnya saja)
+bench/
+
 # Log & data runtime
 logs/
 *.log
