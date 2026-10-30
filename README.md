@@ -1,244 +1,191 @@
-# OpenAI Complexity Router
+# Model Router
 
-Proxy lokal (FastAPI) yang meniru API OpenAI. Klien (Hermes dsb.) mengira ini provider biasa,
-sementara di belakangnya router menilai beratnya tugas lalu memilih model dari **upstream mana pun
-yang API-nya kompatibel OpenAI** — OpenAI resmi, OpenRouter, Azure, reseller, atau server lokal
-(LM Studio / Ollama / vLLM):
+Router model lokal yang memilih model upstream secara dinamis berdasarkan
+berat tugas — ringan pakai flash, berat pakai pro. Dua keputusan: model apa
+dan apakah thinking boleh.
 
+## Cara kerja
+
+Klien kirim request ke `http://127.0.0.1:8000/v1` dengan model `"auto"`.
+Router skor dari kata kunci + sinyal kerja agen (arsitektur +3, debug +2,
+loop panjang +1/2). Sinyal mutasi (+2) dan file sumber (+1) hanya dihitung
+setelah loop >= 6 pesan tool, supaya satu edit tunggal tidak langsung memicu
+heavy. Skor >= threshold -> heavy, else -> light. Threshold default 3
+(`HEAVY_THRESHOLD`); benchmark agen di bawah memakai 4.
+Tier hanya naik di tengah giliran (upgrade satu arah), tidak pernah turun,
+supaya cache prompt per model tidak pecah.
+Tidak ada biaya keputusan (sub-ms, tanpa classifier).
+
+Kebijakan thinking: light -> effort rendah, heavy -> effort tinggi.
+
+Keputusan tercatat di `logs/decisions.jsonl` per baris.
+
+## Mulai
+
+```bash
+git clone https://github.com/Aldosyhptra/fastapi-model-router.git
+cd fastapi-model-router
+python -m venv .venv
+.venv\Scripts\pip.exe install -r requirements.txt
 ```
-Klien -> http://127.0.0.1:8000/v1 -> [nilai tugas] -> OpenAI-compatible upstream
-                                         |- ringan -> LIGHT_MODEL
-                                         `- berat  -> HEAVY_MODEL
+
+Salin `.env.example` ke `.env`, isi `OPENAI_API_KEY` dan `OPENAI_BASE_URL`.
+Pilih model di `.env`: `LIGHT_MODEL` dan `HEAVY_MODEL`.
+
+```bash
+router.cmd start   # foreground (Ctrl+C berhenti)
+router.cmd bg      # minimized background
+router.cmd stop    # matikan
+router.cmd status  # cek status
 ```
 
-Berjalan **hanya di komputermu** (bind ke `127.0.0.1`), tidak perlu hosting.
+## Pilot HTTP awal (17 Okt 2026)
+
+Pilot ini mengirim prompt langsung ke router (bukan lewat agen). Sudah digantikan oleh benchmark agen di bawah.
+
+100 call, 20 prompt x 5 lane, sequential, `max_tokens=300`, `temperature=0`.
+Model: light = `mimo-v2.6-flash`, heavy = `mimo-v2.6-pro`.
+
+| Lane | P50 latency | Cost |
+|---|---|---|
+| pro-langsung | 9700ms | $0.0047 |
+| flash-langsung | 11079ms | $0.0014 |
+| **router-auto** | 11260ms | **$0.0034** |
+| router-light | 8654ms | $0.0016 |
+| router-heavy | 8651ms | $0.0049 |
+
+`router-auto` **hemat 30% vs semua-heavy**, tier accuracy 100% (20/20).
+
+## Benchmark agen (Hermes, 30 Okt 2026)
+
+Mengukur router dari sisi agen sungguhan, bukan HTTP langsung: Hermes Agent
+mengerjakan tugas coding pada proyek Next.js, lalu hasilnya dinilai secara
+otomatis. Yang diukur: tingkat lolos, biaya, waktu, dan perilaku routing.
+
+### Lane
+
+| Lane | Model yang dikirim ke router | Arti |
+|---|---|---|
+| pro-langsung | `mimo-v2.6-pro` | Selalu model kuat |
+| flash-langsung | `mimo-v2.6-flash` | Selalu model murah |
+| router-auto | `auto` | Router memilih light/heavy |
+| router-light | `light` | Dipaksa tier light |
+| router-heavy | `heavy` | Dipaksa tier heavy |
+
+Semua lane lewat router (model eksplisit = passthrough tanpa penilaian),
+sehingga pencatatan usage seragam di `logs/decisions.jsonl`.
+
+### Tata cara
+
+1. **Fixture**: proyek `create-next-app` (TypeScript, Tailwind, App Router) di
+   folder terpisah di luar router (`D:ench
+ext-fixture`), berisi kode contoh
+   dengan bug yang sengaja ditanam. Tag `bench-base` adalah kondisi awal.
+2. **Setiap run** dimulai dari `git reset --hard bench-base` dan hapus `.next`,
+   jadi kondisi awal identik.
+3. **Prompt** dikirim ke Hermes (`hermes chat -q ... --provider model-router`)
+   dengan `[bench-run:<id>]` di depan supaya cache keputusan router tidak
+   terbawa antar run. Prompt satu baris (newline terpotong di shim `.CMD`
+   Windows dan membuat agen menjawab "tidak ada tugas").
+4. **Agen dikunci ke fixture** lewat `terminal.cwd` di profil Hermes `bench`
+   (profil terpisah, tanpa memori atau skill pribadi).
+5. **Penilaian** dilakukan harness, bukan agen: `tsc`, `build`, cek pola kode
+   (`file_contains` / `file_not_contains`), dan smoke HTTP. Perubahan diambil
+   dari git diff sebelum penilaian.
+6. Urutan lane diacak per (tugas, ulangan) dengan seed tetap.
+
+### Kriteria
+
+- **Lolos (PASS)**: semua check pada tugas itu benar. Lolos berarti tugas
+  terpenuhi menurut check otomatis, bukan penilaian kualitas desain.
+- **FAIL**: ada check yang gagal (diff kosong, pola tidak ada, atau build gagal).
+- **Infra error**: tidak ada panggilan tercatat di router (gateway putus).
+  Dikeluarkan dari tingkat lolos dan dilaporkan terpisah. Tidak ada run
+  seperti ini di hasil akhir.
+- **Biaya**: dihitung dari `usage` di log router dengan tabel harga per juta
+  token (flash: input $0.14, cache $0.003, output $0.28; pro: input $0.435,
+  cache $0.004, output $0.87).
+- Label light/heavy per tugas adalah dugaan awal, bukan hasil validasi.
+
+### Konfigurasi
+
+- Dataset: 12 tugas (6 light `L01`–`L06`, 6 heavy `H01`–`H06`).
+- Ulangan: 3 per tugas per lane, 180 run total.
+- `HEAVY_THRESHOLD=4`, `max_turns=25`, timeout 1800 detik per run.
+- Kebijakan eskalasi: mutasi file sumber hanya dihitung setelah loop >= 6 pesan
+  tool (lihat Cara kerja). Ini diubah sebelum run penuh karena kalibrasi
+  menunjukkan satu edit tunggal sudah memicu heavy dan membuat biaya auto
+  melonjak.
+
+### Hasil (180 run, 0 infra error, 0 timeout)
+
+| Lane | Lolos | Biaya/run | Waktu/run | Panggilan/run | Light / Heavy (panggilan) |
+|---|---|---|---|---|---|
+| pro-langsung | 86% | $0.0103 | 206 s | 12.2 | – |
+| flash-langsung | 81% | $0.0039 | 217 s | 13.0 | – |
+| **router-auto** | 83% | **$0.0087** | 174 s | 12.2 | 154 / 285 |
+| router-light | 86% | $0.0031 | 199 s | 12.2 | 440 / 0 |
+| router-heavy | 89% | $0.0104 | 214 s | 12.1 | 0 / 434 |
+
+Per jenis tugas (lolos / biaya per run):
+
+| Lane | Light: lolos | Light: biaya | Heavy: lolos | Heavy: biaya |
+|---|---|---|---|---|
+| pro-langsung | 100% | $0.0035 | 72% | $0.0171 |
+| flash-langsung | 100% | $0.0017 | 61% | $0.0061 |
+| router-auto | 100% | $0.0042 | 67% | $0.0132 |
+| router-light | 100% | $0.0014 | 72% | $0.0049 |
+| router-heavy | 100% | $0.0048 | 78% | $0.0160 |
+
+Penghematan berpasangan (tugas dan ulangan yang sama): router-auto **16%**
+lebih murah dari pro-langsung dan **17%** lebih murah dari router-heavy.
+
+### Pembacaan
+
+- **Router-auto lebih murah dari pro-langsung** (sekitar 16%) dengan tingkat
+  lolos yang hampir sama (83% vs 86%). Selisih 3 poin masih dalam noise untuk
+  36 run per lane, jadi "kualitasnya setara" belum terbukti secara statistik.
+- **Penghematan belum besar** karena router-auto memakai heavy untuk sekitar
+  65% panggilan (285 dari 439). Heavy di tugas heavy memang sering dibutuhkan,
+  tapi eskalasi di tugas light juga masih terjadi.
+- **Router-light dan flash lebih murah**, dan di dataset ini tingkat lolos
+  tugas light-nya sama dengan pro (100%). Artinya tugas light di dataset ini
+  memang ringan.
+- **Tugas heavy tidak membedakan lane dengan tegas.** Pro (72%) dan router-light
+  (72%) hampir sama, dan router-heavy 78%. Ini tanda label heavy belum tentu
+  tepat, atau check-nya terlalu longgar.
+- **H06 gagal di semua lane (0/3 setiap lane).** Ini kemungkinan tugas atau
+  check yang bermasalah, bukan kelemahan satu lane. Perlu diperiksa sebelum
+  dataset dipakai untuk klaim yang lebih kuat.
+
+### Batasan
+
+- Penilaian statis: build, tsc, dan pola kode. Tidak menilai kualitas desain
+  atau perilaku UI di browser (AGENTS.md melarang menjalankan dev server).
+- Dataset kecil (12 tugas) dan label belum divalidasi. Kesimpulan hanya berlaku
+  untuk jenis tugas ini.
+- Threshold dan kebijakan eskalasi dipilih dengan melihat hasil kalibrasi
+  pada tugas yang sama (L01, H01), jadi hasil ini bisa bias ke dataset itu.
+  Untuk klaim yang kuat, pisahkan tugas dev dan test.
+- Kalibrasi awal (sebelum isolasi fixture, dan saat prompt masih rusak) dibuang
+  dan tidak dihitung.
+
+### Menjalankan ulang
+
+Harness ada di `bench-harness/` (tidak di-commit). Langkah singkat:
+
+```bash
+cd bench-harness
+python -m bench --preflight-only          # cek prasyarat dan baseline build
+python -m bench --task-ids L01,H01 --repeats 1   # kalibrasi kecil
+python -m bench --repeats 3               # run penuh (lama, ±4-6 jam)
+```
+
+Konfigurasi ada di `bench/config.json` (berisi path lokal, jangan di-commit).
+Hasil per run: `bench/results/<waktu>/report.md`, `runs/<id>/checks.json`,
+`changes.patch`, dan `router_log_slice.jsonl`.
 
 ## Tech stack
 
-- **Python 3** + **FastAPI** + **uvicorn** (server), **httpx** (client async ke upstream)
-- **python-dotenv** untuk konfigurasi `.env`
-- **pytest** untuk unit test
-- Log keputusan: `logs/decisions.jsonl` (append-only, JSON per baris) — dipakai untuk audit penghematan dan menemukan tugas yang salah rute.
-- Tanpa database, tanpa dependensi berat: ~430 baris kode inti (`app/main.py` + `app/routing.py`).
-
-## Menjalankan (cepat)
-
-Semua lewat cmd, dari folder proyek:
-
-```bat
-router.cmd start      :: nyalakan FOREGROUND di window ini (Ctrl+C berhenti) + status saat sudah ON
-router.cmd bg         :: nyalakan MINIMIZED di background, log ke logs/uvicorn.log
-router.cmd            :: status: ON/OFF, Base URL, model light/heavy, jumlah keputusan, 3 terakhir
-router.cmd stop       :: matikan
-```
-
-`start` vs `bg`: dua-duanya nyalakan uvicorn; `bg` keluar sendiri setelah server hidup (window minimized),
-`start` menahan window karena uvicorn berjalan di situ.
-
-Contoh output `router.cmd` saat ON:
-
-```
-Router        : ON
-Base URL     : http://127.0.0.1:8000/v1
-Light model  : qwen3.8-flash
-Heavy model  : glm-5.3-flash
-Upstream key : terisi
-Keputusan     : 169 tercatat di logs/decisions.jsonl
-Terakhir:
-  [15 Oct 14:36] heavy -> glm-5.3-flash  (HTTP 200, dipaksa klien)
-```
-
-Router mati = Hermes tidak bisa memanggil provider `model-router`. Untuk auto-recovery,
-pasang watchdog (opsional, rekomendasi):
-
-**Watchdog via Task Scheduler (self-healing, tanpa flash window)**
-
-- Task `Hermes Model Router Watchdog` mengecek router tiap 5 menit. Router hidup -> tidak
-  melakukan apa pun. Router mati -> menyalakan ulang minimized (`router.cmd bg`) dalam <5 menit.
-- Action task: `wscript.exe "<folder proyek>\router-watchdog.vbs"` — file `.vbs` 2 baris itu
-  menjalankan `router.cmd bg` dengan window style `0` (tersembunyi). Jangan pakai argumen
-  `start` pada task: itu mode foreground, memunculkan window cmd tiap trigger (terlihat seperti
-  proses mencurigakan) dan rawan ke-close manual.
-- Bikin task sekali (sesuaikan `<path-proyek>` dengan lokasi folder ini di mesinmu):
-  ```bat
-  schtasks /create /tn "Hermes Model Router Watchdog" /sc minute /mo 5 ^
-    /tr "wscript.exe \"<path-proyek>\router-watchdog.vbs\""
-  ```
-  Edit juga baris dalam `router-watchdog.vbs` agar menunjuk ke path proyekmu.
-- Cek: `schtasks /query /tn "Hermes Model Router Watchdog" /fo LIST` — kolom "Task To Run"
-  harus `wscript.exe ...vbs`, bukan `router.cmd` langsung. Hapus: `schtasks /delete /tn ... /f`.
-
-## Deploy ke VPS (opsional)
-
-Repo ini portable. Di `.env` VPS:
-
-```
-BIND_HOST=0.0.0.0            # WAJIB bersama LOCAL_API_KEY terisi + HTTPS via reverse proxy
-PUBLIC_BASE_URL=https://domainmu.com/v1   # yang ditampilkan `router.cmd` dan dipakai client
-```
-
-Tanpa `PUBLIC_BASE_URL`, status otomatis menampilkan `http://127.0.0.1:<BIND_PORT>/v1`.
-Kalau dibuka ke publik: satu-satunya pengaman adalah `LOCAL_API_KEY` (Bearer) — jangan
-pernah expose tanpa itu, dan pakai HTTPS (Caddy/Nginx) karena key = saldo billing upstreammu.
-
-## Menjalankan (manual)
-
-```bash
-# 1. Buat virtual environment
-python -m venv .venv
-
-# Windows (PowerShell):  .venv/Scripts/Activate.ps1
-# Linux / macOS:         source .venv/bin/activate
-
-# 2. Pasang dependency
-pip install -r requirements.txt
-
-# 3. Konfigurasi
-cp .env.example .env        # Windows: copy .env.example .env
-# lalu isi OPENAI_BASE_URL, OPENAI_API_KEY, LIGHT_MODEL, HEAVY_MODEL
-
-# 4. Jalankan (jangan ganti host ke 0.0.0.0)
-.venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-Cek: buka http://127.0.0.1:8000/health dan http://127.0.0.1:8000/docs
-
-## Tes cepat
-
-```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $LOCAL_API_KEY" \
-  -d '{"model":"auto","messages":[{"role":"user","content":"ganti nama variabel x jadi total"}]}' -i
-```
-
-Lihat header `X-Router-Tier` dan `X-Router-Model` di respons untuk mengetahui model yang dipilih.
-
-## Pasang di Hermes
-
-Router ini didaftarkan sebagai **provider OpenAI-compatible biasa** (tanpa plugin tambahan):
-
-```bash
-hermes config set providers.model-router.base_url "http://127.0.0.1:8000/v1"
-hermes config set providers.model-router.key_env  "MODEL_ROUTER_API_KEY"
-hermes config set providers.model-router.model    "auto"
-hermes config set providers.model-router.models   '["auto","light","heavy"]'
-```
-
-`MODEL_ROUTER_API_KEY` di `~/.hermes/.env` harus sama dengan `LOCAL_API_KEY` di `.env` proyek ini
-(Hermes membaca `.env` saat start, jadi restart sesi setelah mengubahnya).
-
-Pakai sebagai model: `hermes -m auto --provider model-router`, atau `/model` di sesi berjalan.
-Model `light` / `heavy` memaksa tier tanpa menilai tugas.
-
-Catatan: kalau agent/klien kamu punya mekanisme router bawaan (mis. plugin router di Hermes),
-nonaktifkan atau set semua perannya ke `auto` supaya tidak terjadi routing ganda — router ini
-harus satu-satunya yang memutuskan.
-
-## Cara menilai tugas (app/routing.py)
-
-Skor dari pesan **user** terakhir (bukan hasil tool) + **sinyal kerja agen** per API call:
-
-| Sinyal | Skor |
-|---|---|
-| Kata kunci kuat (arsitektur, security review, root cause, desain, refactor, ...) | +3 per kata (maks 6) |
-| Kata kunci sedang (debug, optim*, performance, analisis, ...) | +2 per kata (maks 4) |
-| Stack trace | +2 |
-| 3+ nama file berbeda | +2 |
-| 2+ blok kode fenced | +1 |
-| Pesan panjang (>600 / >1500 karakter) | +1 / +2 |
-| Konteks besar (>12k / >30k token) | +1 / +2 |
-| Kata ringan (rename, format, jelaskan, ...) | -1 per kata (maks -3) |
-| **Agen memanggil tool mutasi** (write/edit/patch/install/git commit, atau shell dengan perintah ubah) | **+2** |
-| **Mutasi menyasar file sumber** (.py/.tsx/.js/.css/... bukan dokumen) | **+1** |
-| **Loop agen panjang** (≥6 / ≥12 pesan setelah user terakhir) | **+1 / +2** |
-
-Skor >= `HEAVY_THRESHOLD` (bawaan 3) -> heavy. Panggilan bantu otomatis (judul/ringkasan,
-tanpa tool) selalu light.
-
-**Kebijakan upgrade satu arah (versi 2):** keputusan awal di-cache per giliran pengguna
-(in-memory, TTL 6 jam, maks 2000 sesi), tapi setiap API call sinyal kerja agen dinilai ulang.
-Tier boleh **naik** light->heavy di tengah giliran (mis. user cuma minta "ubah warna" tapi agen
-malah mengedit file sumber) — dan tidak pernah turun, supaya cache prompt upstream tidak
-bolak-balik. Sinyal agen tidak diakumulasi antar call (mutasi yang sama tidak dihitung dua kali).
-
-## Kebijakan thinking (reasoning)
-
-- Tier **light**: param thinking (`reasoning_effort`, `thinking`, `enable_thinking`, dst.)
-  otomatis **dibuang** sebelum forward — token reasoning di request ringan hanya memboroskan.
-- Tier **heavy**: klien boleh thinking; kalau klien tidak mengirim apa pun, router mengisi
-  `reasoning_effort` dari `HEAVY_REASONING_EFFORT` (mis. `high`). Kosongkan nilai ini kalau
-  model upstream menolak param tersebut.
-- Hasilnya tercatat di `decisions.jsonl`: `thinking:strip` (dibuang) atau `thinking:high` (diisi).
-
-## Log
-
-`logs/decisions.jsonl` berisi tier, model, alasan, skor, perkiraan token, latensi, dan
-usage (jika provider mengirim). **Isi prompt dan API key tidak dicatat.**
-Gunakan log ini untuk menghitung penghematan dan menemukan tugas yang salah dirutekan.
-
-## Tes
-
-```bash
-.venv/Scripts/python.exe -m pytest tests -q
-```
-
-## Benchmark (17 Okt 2026)
-
-Pengukuran efisiensi router: **prompt & parameter sama persis**, yang dibedakan hanya
-jalur (langsung vs router) dan model (flash vs pro).
-
-### Spesifikasi
-
-| | |
-|---|---|
-| Tanggal | 17 Oktober 2026 |
-| Prompt | 20 (10 ringan + 10 berat), label tier ditulis manual |
-| Parameter | `max_tokens=300`, `temperature=0`, `stream=true` + `stream_options.include_usage` |
-| Call | 100 sequential (20 prompt x 5 lane), tanpa konkurensi |
-| Sistem | Windows 11, satu mesin, koneksi lokal ke upstream (tanpa proxy lain) |
-| Metode | HTTP langsung via Python stdlib (`urllib`) ke endpoint `/v1/chat/completions` — lane langsung memakai upstream, lane router memakai router lokal |
-| Upstream | SumoPod (OpenAI-compatible) |
-| Model | light = `mimo-v2.6-flash`, heavy = `mimo-v2.6-pro` |
-| Penggunaan riil | 265 request dari sesi Hermes Agent v0.21.5 (Windows 11, client agent dengan terminal/file tools & skill coding) |
-
-### Hasil
-
-| Lane | OK | Avg latency | P50 latency | Tok in/out | Cost total |
-|---|---|---|---|---|---|
-| pro-langsung | 20 | 9744ms | 9700ms | 860/5017 | $0.0047 |
-| flash-langsung | 20 | 12509ms | 11079ms | 860/4480 | $0.0014 |
-| router-auto | 20 | 15557ms | 11260ms | 860/5003 | $0.0034 |
-| router-light | 20 | 9047ms | 8654ms | 860/5169 | $0.0016 |
-| router-heavy | 20 | 8938ms | 8651ms | 860/5145 | $0.0049 |
-
-- **Auto vs semua-heavy (router-heavy): hemat 30%** ($0.0034 vs $0.0049) dengan tier
-  accuracy 100% — biaya routing hanya dibayar untuk tugas yang benar-benar berat.
-- **router-heavy vs pro-langsung**: `reasoning_effort=high` di-inject kebijakan thinking
-  untuk tugas berat — itu memang biaya yang dibeli secara sadar, bukan kebocoran.
-- Panjang output bervariasi antar-run meski `temperature=0` (perbedaan backend upstream);
-  karenanya angka token/output dibaca sebagai biaya relatif, bukan perbandingan mutlak.
-- Overhead router sendiri tidak terlihat di latency (keputusan skor sub-milidetik);
-  selisih latency antar lane lebih banyak dipengaruhi antrian upstream.
-
-### Tier accuracy (auto vs label): 100% (20/20)
-
-Sebelumnya 80% (16/20) dengan 4 miss semuanya tugas berat yang salah dianggap ringan
-(false-light): 2 kasus mepet threshold (score 2), 2 kasus kalah morfologi bahasa Indonesia
-(`mengoptimalkan` tidak mengandung `optimasi`, `desain` belum masuk kamus). Perbaikan:
-kata kunci kuat ditambah (`desain`, `refactor` dipromosikan ke sinyal kuat) dan kata kunci
-sedang dibuat berbasis prefiks (`optim`) sehingga turunan imbuhan ikut terdeteksi.
-Setelah perbaikan: 20/20, tanpa mengorbankan prompt ringan.
-
-## Keterbatasan
-
-- Heuristik berbasis aturan: bisa salah menilai. Cek log dan sesuaikan kata kunci/threshold.
-- Tidak bisa downgrade heavy->light dalam satu giliran (by design: lindungi prompt-cache).
-- Upgrade light->heavy di tengah giliran tetap memakai cache (prompt yang dikirim identik;
-  yang berubah hanya tujuan model).
-- Estimasi token kasar (karakter / 4), bukan tokenizer asli.
-- Cache keputusan ada di memori; hilang saat server restart.
-- Belum ada eskalasi otomatis berbasis hasil (light gagal -> ulang di heavy).
-- Streaming dan tool calling sudah diuji end-to-end lewat Hermes (2026-10-15), termasuk
-  saat provider mengembalikan 429 di tengah jalan (diteruskan apa adanya, klien retry sendiri).
-- Tidak ada rate limit atau batas biaya; pantau saldo billing upstreammu.
+Python 3 + FastAPI + uvicorn + httpx + python-dotenv + pytest.
+Tanpa database, ~430 baris kode inti.
