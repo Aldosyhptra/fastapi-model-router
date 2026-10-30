@@ -170,22 +170,6 @@ lebih murah dari pro-langsung dan **17%** lebih murah dari router-heavy.
 - Kalibrasi awal (sebelum isolasi fixture, dan saat prompt masih rusak) dibuang
   dan tidak dihitung.
 
-### Menjalankan ulang
-
-Harness ada di `bench-harness/` (tidak di-commit). Langkah singkat:
-
-```bash
-cd bench-harness
-python -m bench --preflight-only          # cek prasyarat dan baseline build
-python -m bench --task-ids L01,H01 --repeats 1   # kalibrasi kecil
-python -m bench --repeats 3               # run penuh (lama, ±4-6 jam)
-```
-
-Konfigurasi ada di `bench/config.json` (berisi path lokal, jangan di-commit).
-Hasil per run: `bench/results/<waktu>/report.md`, `runs/<id>/checks.json`,
-`changes.patch`, dan `router_log_slice.jsonl`.
-
 ## Tech stack
 
 Python 3 + FastAPI + uvicorn + httpx + python-dotenv + pytest.
-Tanpa database, ~430 baris kode inti.
