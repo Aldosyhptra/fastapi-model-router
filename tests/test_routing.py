@@ -101,8 +101,15 @@ class UpgradeTests(unittest.TestCase):
             {"role": "tool", "content": "ok"},
         ]
         second = decide(looping, True, self.cache)
-        self.assertEqual(second.tier, "heavy")
-        self.assertIn("upgrade", second.reason)
+        # satu edit tunggal tidak cukup untuk upgrade (kebijakan hemat biaya)
+        self.assertEqual(second.tier, "light")
+        self.assertNotIn("upgrade", second.reason)
+        # edit setelah loop panjang (>= 6 pesan tool) baru memicu upgrade
+        for i in range(6):
+            looping += [assistant_with_tool("search_files", "{}"), {"role": "tool", "content": "ok"}]
+        third = decide(looping, True, self.cache)
+        self.assertEqual(third.tier, "heavy")
+        self.assertIn("upgrade", third.reason)
 
     def test_heavy_never_downgrades(self):
         base = msgs("Rancang arsitektur sistem antrian")

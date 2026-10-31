@@ -97,14 +97,16 @@ def agent_score(messages: list[dict]) -> tuple[int, list[str]]:
                 mutated = True
                 if SRC_EXT_RE.search(args):
                     src_edit = True
-    if mutated:
+    n = len(tail)
+    # Mutasi file sumber hanya dihitung setelah loop >= 6 pesan tool; satu edit
+    # tunggal tidak memicu heavy (hemat biaya). Ceiling: belum ada sinyal
+    # kegagalan check di router; upgrade path = baca hasil check dari klien.
+    if mutated and n >= 6:
         score += 2
         reasons.append("mutasi")
-    if src_edit:
+    if src_edit and n >= 6:
         score += 1
         reasons.append("file-sumber")
-
-    n = len(tail)
     if n >= 12:
         score += 2
         reasons.append(f"loop-panjang:{n}")

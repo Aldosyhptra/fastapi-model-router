@@ -9,6 +9,10 @@ CLAUDE.md
 
 # Benchmark lokal (README memuat metode + hasilnya saja)
 bench/
+bench-harness/
+
+# Unit test
+tests/
 
 # Log & data runtime
 logs/
