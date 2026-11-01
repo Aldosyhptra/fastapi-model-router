@@ -1,8 +1,7 @@
 # Model Router
 
 Router model lokal yang memilih model upstream secara dinamis berdasarkan
-berat tugas — ringan pakai flash, berat pakai pro. Dua keputusan: model apa
-dan apakah thinking boleh.
+berat tugas — ringan pakai flash, berat pakai pro. Keputusan: model apa.
 
 ## Cara kerja
 
@@ -16,7 +15,8 @@ Tier hanya naik di tengah giliran (upgrade satu arah), tidak pernah turun,
 supaya cache prompt per model tidak pecah.
 Tidak ada biaya keputusan (sub-ms, tanpa classifier).
 
-Kebijakan thinking: light -> effort rendah, heavy -> effort tinggi.
+Param thinking (`reasoning_effort` dll.) diteruskan apa adanya dari klien —
+level reasoning diatur di sisi klien (mis. `agent.reasoning_effort` di Hermes).
 
 Keputusan tercatat di `logs/decisions.jsonl` per baris.
 
