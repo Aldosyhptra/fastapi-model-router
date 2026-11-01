@@ -17,8 +17,9 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from . import dashboard
+from . import dashboard, dashboard_api, tiers as tiers_cfg
 from .routing import TurnCache, decide
+from fastapi.staticfiles import StaticFiles
 
 try:  # .env opsional
     from dotenv import load_dotenv
@@ -66,6 +67,10 @@ app = FastAPI(title="OpenAI-compatible Complexity Router", lifespan=lifespan)
 BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 if BIND_HOST in {"127.0.0.1", "localhost", "::1"} and dashboard.password_configured():
     app.include_router(dashboard.router)
+    app.include_router(dashboard_api.router)
+    _dist = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+    if _dist.exists():
+        app.mount("/dashboard", StaticFiles(directory=_dist, html=True), name="dashboard")
 else:
     log.info("dashboard nonaktif (BIND_HOST=%s atau password belum di-set)", BIND_HOST)
 
@@ -99,8 +104,8 @@ async def health():
     return {
         "ok": True,
         "public_url": PUBLIC_BASE_URL or f"http://127.0.0.1:{BIND_PORT}/v1",
-        "light": LIGHT_MODEL,
-        "heavy": HEAVY_MODEL,
+        "light": tiers_cfg.current_models(LIGHT_MODEL, HEAVY_MODEL)[0],
+        "heavy": tiers_cfg.current_models(LIGHT_MODEL, HEAVY_MODEL)[1],
         "configured": bool(BASE_URL and API_KEY),
     }
 
@@ -142,12 +147,13 @@ async def chat_completions(request: Request):
     if requested in AUTO_ALIASES:
         d = decide(messages, bool(payload.get("tools")), cache, HEAVY_THRESHOLD)
         tier, reason, score = d.tier, d.reason, d.score
-        model = HEAVY_MODEL if tier == "heavy" else LIGHT_MODEL
+        light_model, heavy_model = tiers_cfg.current_models(LIGHT_MODEL, HEAVY_MODEL)
+        model = heavy_model if tier == "heavy" else light_model
         session, est = d.session, d.est_tokens
     elif requested == "light":
-        tier, reason, score, model, session, est = "light", "dipaksa klien", 0, LIGHT_MODEL, "-", 0
+        tier, reason, score, model, session, est = "light", "dipaksa klien", 0, tiers_cfg.current_models(LIGHT_MODEL, HEAVY_MODEL)[0], "-", 0
     elif requested == "heavy":
-        tier, reason, score, model, session, est = "heavy", "dipaksa klien", 0, HEAVY_MODEL, "-", 0
+        tier, reason, score, model, session, est = "heavy", "dipaksa klien", 0, tiers_cfg.current_models(LIGHT_MODEL, HEAVY_MODEL)[1], "-", 0
     else:  # nama model lain: teruskan apa adanya
         tier, reason, score, model, session, est = "passthrough", "model eksplisit", 0, requested, "-", 0
 
