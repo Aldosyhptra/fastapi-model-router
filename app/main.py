@@ -17,6 +17,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from . import dashboard
 from .routing import TurnCache, decide
 
 try:  # .env opsional
@@ -60,6 +61,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="OpenAI-compatible Complexity Router", lifespan=lifespan)
+
+# Dashboard hanya aktif di localhost dan jika password sudah di-set (lihat PRD-dashboard.md, F1).
+BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
+if BIND_HOST in {"127.0.0.1", "localhost", "::1"} and dashboard.password_configured():
+    app.include_router(dashboard.router)
+else:
+    log.info("dashboard nonaktif (BIND_HOST=%s atau password belum di-set)", BIND_HOST)
 
 
 def check_local_auth(request: Request) -> None:
