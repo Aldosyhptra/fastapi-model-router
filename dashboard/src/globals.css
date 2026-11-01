@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+@theme {
+  /* Token warna dari docs/DESIGN.md — komponen hanya pakai nama token ini. */
+  --color-bg: #0b0e13;
+  --color-surface: #131821;
+  --color-surface-2: #1a2130;
+  --color-border: #242c3b;
+  --color-text: #e6e9ef;
+  --color-muted: #8b95a7;
+  --color-primary: #60a5fa;
+  --color-tier-light: #2dd4bf;
+  --color-tier-heavy: #a78bfa;
+  --color-tier-pass: #8b95a7;
+  --color-ok: #34d399;
+  --color-warn: #f59e0b;
+  --color-error: #f87171;
+
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "Roboto Mono", ui-monospace, monospace;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
